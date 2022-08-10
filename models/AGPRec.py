@@ -57,9 +57,9 @@ class self_gate(nn.Module):
         gate = torch.sigmoid(gate)
         return embedding * gate
     
-class DAGRec(nn.Module):
+class AGPRec(nn.Module):
     def __init__(self,args,graph_g_u,graph,device):
-        super(DAGRec, self).__init__()
+        super(AGPRec, self).__init__()
         #parameter 
         self.embedding_dim = args.embed_size
         self.num_users = graph.nodes('user').shape[0]
