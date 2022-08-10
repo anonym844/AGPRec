@@ -7,7 +7,7 @@ import pickle
 from collections import defaultdict
 import itertools
 from dataset import GDataset
-from models.DAGRec import DAGRec
+from models.AGPRec import AGPRec
 from models.Predictor import HeteroDotProductPredictor
 from utils.util import Helper
 from utils.parser import parse_args
@@ -205,7 +205,7 @@ if __name__ =='__main__':
 
     val_length = val_graph.num_edges()
 
-    model = DAGRec(args,graph_g_u,uv_g,device)
+    model = AGPRec(args,graph_g_u,uv_g,device)
     model = model.to(device)
     opt = t.optim.Adam(model.parameters(), lr = args.lr, weight_decay=args.weight_decay)
     # K = args.topK
