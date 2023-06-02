@@ -7,7 +7,9 @@ import pickle
 from collections import defaultdict
 import itertools
 from dataset import GDataset
-from models.AGPRec import AGPRec
+# from models.LightGCN_hete import LightGCN
+# from models.MF import MF
+from models.group_asp import group_asp
 from models.Predictor import HeteroDotProductPredictor
 from utils.util import Helper
 from utils.parser import parse_args
@@ -15,7 +17,9 @@ import pdb
 from torch.utils.data import TensorDataset, DataLoader
 import torch as t
 import dgl
+# import dgl.function as fn
 import scipy.sparse as sp
+import logging
 
 
 def innerProduct(u, i, j):
@@ -65,14 +69,12 @@ def construct_negative_graph(graph, etype,device):
 
 def training(model,group_user):
     best_val_loss = 99999999
-
     stop_count = 0
     for e in range(args.epochs):
         print('Epoch: ', e)
-
         model.train()
         graph_neg = construct_negative_graph(uv_g, ('user', 'rate', 'item'),device)
-        user_embed, item_embed = model(uv_g,group_user)
+        user_embed, item_embed, group_emb = model(uv_g,group_user)
         h= {"user": user_embed, "item": item_embed}
         score = predictor(uv_g, h, ('user', 'rate', 'item'))
         score_neg = predictor(graph_neg, h, ('user', 'rate', 'item'))
@@ -82,8 +84,18 @@ def training(model,group_user):
             aspect_reg_loss = model.aspect_regular()
         else:
             aspect_reg_loss = 0
+        aspect_reg_loss = 0
         # loss = bprloss
-        loss = (1.0 - args.reg_coef) * bprloss + args.reg_coef * aspect_reg_loss
+        h2 = {"group": group_emb, "item": model.item_embedding}
+        group_score = predictor(graph_g_i, h2, ('group', 'rate', 'item'))
+        group_graph_neg = construct_negative_graph(graph_g_i, ('group', 'rate', 'item'),device)
+        group_neg_score = predictor(group_graph_neg, h2, ('group', 'rate', 'item'))
+        group_loss = -(group_score - group_neg_score).sigmoid().log().sum()
+
+        loss = (1 - args.group_loss_reg) * bprloss + args.reg_coef * aspect_reg_loss + args.group_loss_reg * group_loss
+        # loss = (1 - args.group_loss_reg) * bprloss +  args.group_loss_reg * group_loss
+        # pdb.set_trace()
+        # loss = (1.0 - args.reg_coef) * bprloss + args.reg_coef * aspect_reg_loss
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -93,36 +105,54 @@ def training(model,group_user):
         with torch.no_grad():
             model.eval()
 
-            user_embed, item_embed = model(uv_g,group_user)
+            user_embed, item_embed, group_emb = model(uv_g,group_user)
 
             val_loss = 0
             h= {"user": user_embed, "item": item_embed}
+            h2 = {"group": group_emb, "item": model.item_embedding}
             graph_neg = construct_negative_graph(val_graph, ('user', 'rate', 'item'),device)
             score = predictor(val_graph, h, ('user', 'rate', 'item'))
             score_neg = predictor(graph_neg, h, ('user', 'rate', 'item'))
-
-            val_loss = (-(score - score_neg).sigmoid().log().sum())/val_length
-
-            print('val_loss: ', val_loss)
+            if args.num_aspects > 1:
+                aspect_reg_loss = model.aspect_regular()
+            else:
+                aspect_reg_loss = 0
+            # aspect_reg_loss = 0
+            group_score = predictor(graph_g_i_val, h2, ('group', 'rate', 'item'))
+            group_graph_val_neg = construct_negative_graph(graph_g_i_val, ('group', 'rate', 'item'),device)
+            group_neg_score = predictor(group_graph_val_neg, h2, ('group', 'rate', 'item'))
+            group_loss = -(group_score - group_neg_score).sigmoid().log().sum()
+            # val_loss = (-(score - score_neg).sigmoid().log().sum())/val_length
+            
+            bprloss = -(score - score_neg).sigmoid().log().sum()
+            # aspect_reg_loss = model.aspect_regular()
+            # val_loss = (1 - args.group_loss_reg) * bprloss +  args.group_loss_reg * group_loss
+            val_loss = (1 - args.group_loss_reg) * bprloss + args.reg_coef * aspect_reg_loss + args.group_loss_reg * group_loss
+            # val_loss = (1.0 - args.reg_coef) * bprloss + args.reg_coef * aspect_reg_loss
+            print("val loss: ", val_loss)
 
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             stop_count = 0
-            torch.save(model, 'models/saved_model/' + args.data+'_'+str(args.lr)+'_'+str(args.weight_decay)+ '_' +str(args.embed_size) +'_' +str(args.layer_num) +'_'+str(args.num_aspects)+ '_'+str(args.threshold)+'_'+str(args.reg_coef) +'_' + str(args.tau_gumbel) + '_' + str(args.cold) +'.pt')
+            torch.save(model, 'models/saved_model/' + args.data+'_'+str(args.lr)+'_'+str(args.weight_decay)+ '_' +str(args.embed_size) +'_' +str(args.layer_num) +'_'+str(args.num_aspects)+ '_'+str(args.threshold)+'_'+str(args.reg_coef) + '_'+ str(args.group_loss_reg)+'_' + str(args.tau_gumbel) +'_'+ str(args.seed) +'.pt')
         else:
             stop_count += 1
             if stop_count > args.early_stop:
                 break
 
-    model_final = torch.load('models/saved_model/' + args.data+'_'+str(args.lr)+'_'+str(args.weight_decay)+ '_' +str(args.embed_size) +'_' +str(args.layer_num) +'_'+str(args.num_aspects)+ '_'+str(args.threshold)+'_'+str(args.reg_coef) +'_' + str(args.tau_gumbel) + '_' + str(args.cold) +'.pt')
+    model_final = torch.load('models/saved_model/' + args.data+'_'+str(args.lr)+'_'+str(args.weight_decay)+ '_' +str(args.embed_size) +'_' +str(args.layer_num) +'_'+str(args.num_aspects)+ '_'+str(args.threshold)+'_'+str(args.reg_coef) + '_'+ str(args.group_loss_reg)+'_' + str(args.tau_gumbel) +'_'+ str(args.seed) +'.pt')
     model_final.cpu()
     model_final.eval()
     # graph_g_u_p = graph_g_u_p.to(torch.device('cpu'))
     group_user = group_user.to(torch.device('cpu'))
     graph = uv_g.to(torch.device('cpu'))
-    result = helper.test_model(model_final, u_i_train_dict,u_i_test_dict, K, graph,group_user)
+    result = helper.test_model(model_final, u_i_train_dict,u_i_test_dict, K, graph,group_user, target='user')
     print(result)
+    print('\t')
+    group_graph = graph_g_i.to(torch.device('cpu'))
+    group_result = helper.test_model(model_final, g_i_train_dict,g_i_test_dict, K, graph,group_user, target='group',g_i_graph = group_graph)
+    print(group_result)
 
 def build_side_graph(dataset,g_m_d):
     edge_g2, edge_u = [],[]
@@ -152,9 +182,11 @@ def open_graph(path,name):
 
 
 if __name__ =='__main__':
-    setup_seed(1008)
+    # setup_seed(1008)
     args = parse_args()
     print(args)
+    setup_seed(args.seed)
+
     device = torch.device('cuda:'+str(args.cuda)  if torch.cuda.is_available() else 'cpu')
     # device = torch.device('cpu')
     data_path = './datasets/'+ args.data+'/'
@@ -164,7 +196,10 @@ if __name__ =='__main__':
         dataset = GDataset(data_path, args.num_negatives)
         uv_g, val= prepare_data(dataset)
         save_graph(uv_g,data_path,'uv_g')
-
+        graph_g_i = dataset.graph_g_i
+        graph_g_i_val = dataset.graph_g_i_val
+        save_graph(dataset.graph_g_i,data_path,'graph_g_i')
+        save_graph(dataset.graph_g_i_val,data_path,'graph_g_i_val')
         g_m_d = helper.gen_group_member_dict('./datasets/' + args.data + '/groupMember.txt')
         num_group = len(g_m_d)
 
@@ -182,30 +217,36 @@ if __name__ =='__main__':
         save_graph(val_graph,data_path,'val_graph')
         save_graph(dataset.u_i_train_dict,data_path,'u_i_train_dict')
         save_graph(dataset.u_i_test_dict,data_path,'u_i_test_dict')
+        save_graph(dataset.g_i_train_dict,data_path,'g_i_train_dict')
+        save_graph(dataset.g_i_test_dict,data_path,'g_i_test_dict')
         u_i_train_dict = dataset.u_i_train_dict
         u_i_test_dict = dataset.u_i_test_dict
-        
+        g_i_train_dict = dataset.g_i_train_dict
+        g_i_test_dict = dataset.g_i_test_dict
     else:
         uv_g = open_graph(data_path,'uv_g')
         graph_g_u = open_graph(data_path,'graph_g_u')
         val_graph = open_graph(data_path,'val_graph')
-
+        graph_g_i = open_graph(data_path,'graph_g_i')
+        graph_g_i_val = open_graph(data_path,'graph_g_i_val')
         group_user = torch.load(data_path+'group_user.pt')
         u_i_train_dict = open_graph(data_path,'u_i_train_dict')
         u_i_test_dict = open_graph(data_path,'u_i_test_dict')
-
+        g_i_train_dict = open_graph(data_path,'g_i_train_dict')
+        g_i_test_dict = open_graph(data_path,'g_i_test_dict')
 
     
     group_user = group_user.to(device)
 
     uv_g = uv_g.to(device)
-
+    graph_g_i = graph_g_i.to(device)
+    graph_g_i_val = graph_g_i_val.to(device)
     graph_g_u = graph_g_u.to(device)
     val_graph = val_graph.to(device)
 
-    val_length = val_graph.num_edges()
+    # val_length = val_graph.num_edges()
 
-    model = AGPRec(args,graph_g_u,uv_g,device)
+    model = group_asp(args,graph_g_u,uv_g,device)
     model = model.to(device)
     opt = t.optim.Adam(model.parameters(), lr = args.lr, weight_decay=args.weight_decay)
     # K = args.topK
